@@ -105,14 +105,22 @@
     return id;
   }
   function mediasDe(e) {
-    return [e.mediaId, e.photoId, e.cartelPhotoId, ...(e.vocaux || [])].filter(Boolean);
+    return [e.mediaId, e.photoId, ...(e.vues || []), e.cartelPhotoId, ...(e.vocaux || [])].filter(Boolean);
+  }
+  // Une œuvre : photo principale (photoId), autres vues (vues), photo du cartel (cartelPhotoId).
+  const nouvelleOeuvre = (visiteId, extra = {}) => ({ id: uid(), visiteId, type: 'oeuvre', creeLe: Date.now(), artiste: '', titre: '', cartel: '', notes: '', vocaux: [], vues: [], ...extra });
+  const nbVues = (e) => (e.photoId ? 1 : 0) + (e.vues || []).length;
+  // Ajoute des photos à une œuvre : la première devient la photo principale s'il n'y en a pas encore.
+  function ajouterVues(x, ids) {
+    x.vues = x.vues || [];
+    for (const mid of ids) { if (!x.photoId) x.photoId = mid; else x.vues.push(mid); }
   }
   async function supprimerElement(e) {
     for (const m of mediasDe(e)) await effacer('medias', m);
     await effacer('elements', e.id);
     await toucherVisite(e.visiteId);
   }
-  const oeuvreVide = (e) => e.type === 'oeuvre' && !e.photoId && !e.cartelPhotoId && !e.artiste && !e.titre && !e.cartel && !e.notes && !(e.vocaux || []).length;
+  const oeuvreVide = (e) => e.type === 'oeuvre' && !e.photoId && !(e.vues || []).length && !e.cartelPhotoId && !e.artiste && !e.titre && !e.cartel && !e.notes && !(e.vocaux || []).length;
 
   // ---------- Médias affichés ----------
   let urls = [];
@@ -505,7 +513,7 @@
       const img = e.photoId || e.cartelPhotoId;
       return `<a class="tuile" href="#/oeuvre/${esc(e.id)}">
         <div class="tirage"><div class="image">${img ? `<img alt="" data-media="${esc(img)}">` : ''}</div></div>
-        <div class="legende"><span class="t">${esc(e.titre || (e.ocr === 'en-cours' ? 'Lecture du cartel…' : 'Œuvre sans titre'))}</span>${e.artiste ? `<span class="s">${esc(e.artiste)}</span>` : ''}</div>
+        <div class="legende"><span class="t">${esc(e.titre || (e.ocr === 'en-cours' ? 'Lecture du cartel…' : 'Œuvre sans titre'))}</span>${e.artiste || nbVues(e) > 1 ? `<span class="s">${esc([e.artiste, nbVues(e) > 1 ? `${nbVues(e)} vues` : ''].filter(Boolean).join(' · '))}</span>` : ''}</div>
       </a>`;
     }
     if (e.type === 'photo') {
@@ -545,7 +553,7 @@
     app.innerHTML = `<div class="page">
       <div class="barre-haut">
         <a class="icone-btn" href="#/" aria-label="Retour aux visites">${I.retour}</a>
-        <a class="icone-btn" href="#/visite/${esc(v.id)}/modifier" aria-label="Modifier le titre, le lieu ou la date">${I.crayon}</a>
+        <a class="btn btn-haut" href="#/visite/${esc(v.id)}/modifier" aria-label="Modifier ou supprimer la visite">${I.crayon}Modifier</a>
       </div>
       <header class="entete-visite">
         <span class="date">${esc(fmtDate(v.date))}</span>
@@ -569,7 +577,7 @@
     const nouvelElement = (type, extra) => ({ id: uid(), visiteId: v.id, type, creeLe: Date.now(), ...extra });
 
     app.querySelector('[data-capture="oeuvre"]').addEventListener('click', async () => {
-      const e = nouvelElement('oeuvre', { artiste: '', titre: '', cartel: '', notes: '', vocaux: [] });
+      const e = nouvelleOeuvre(v.id);
       await ecrire('elements', e);
       aller(`#/oeuvre/${e.id}`);
     });
@@ -587,7 +595,10 @@
     });
     app.querySelector('[data-capture="import"]').addEventListener('click', async () => {
       const fichiers = await choisirFichiers({ accept: 'image/*,video/*', multiple: true });
-      if (fichiers.length) await importerMedias(fichiers, v.id);
+      if (!fichiers.length) return;
+      const nbImages = fichiers.filter((f) => !(f.type || '').startsWith('video/')).length;
+      const mode = nbImages ? await choisirRangement(nbImages) : 'photos';
+      if (mode) await importerMedias(fichiers, v.id, mode);
     });
     app.querySelectorAll('[data-note]').forEach((b) => b.addEventListener('click', () => editerNote(b.getAttribute('data-note'), v.id)));
     app.querySelectorAll('[data-voir]').forEach((b) => b.addEventListener('click', () => visionner(b.getAttribute('data-voir'))));
@@ -608,18 +619,98 @@
       setTimeout(() => res(0), 4000);
     });
   }
-  async function importerMedias(fichiers, visiteId) {
+  // Choix du rangement des photos importées. Renvoie 'oeuvres', 'une-oeuvre', 'photos' ou null (annulé).
+  function choisirRangement(n) {
+    return new Promise((res) => {
+      const d = ouvrirDialogue(`<div class="boite">
+        <h2>Ranger ${n > 1 ? `les ${n} photos` : 'la photo'}</h2>
+        <button type="button" class="btn btn-accent" data-mode="oeuvres">${n > 1 ? 'Une œuvre par photo' : 'En faire une œuvre'}</button>
+        ${n > 1 ? '<button type="button" class="btn" data-mode="une-oeuvre">Une seule œuvre, en plusieurs vues</button>' : ''}
+        <button type="button" class="btn" data-mode="photos">${n > 1 ? 'Simples photos de la visite' : 'Simple photo de la visite'}</button>
+        <p class="aide" style="margin:0">Une œuvre a sa fiche, où l’on ajoute le cartel, d’autres vues, des notes. Une photo rangée autrement pourra devenir une œuvre plus tard : il suffit de la toucher.</p>
+        <button type="button" class="btn btn-lien" data-mode="">Annuler</button>
+      </div>`);
+      let choix = null;
+      d.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { choix = b.getAttribute('data-mode') || null; d.close(); }));
+      d.addEventListener('close', () => res(choix));
+    });
+  }
+  async function importerMedias(fichiers, visiteId, mode = 'photos') {
     message(fichiers.length > 1 ? `Import de ${fichiers.length} fichiers…` : 'Enregistrement…', 1800);
     let base = Date.now();
+    let groupe = null;
     for (const f of fichiers) {
       const video = (f.type || '').startsWith('video/');
       const blob = video ? f : await preparerImage(f);
       const mediaId = await ajouterMedia(blob, video ? 'video' : 'photo');
-      const e = { id: uid(), visiteId, type: video ? 'video' : 'photo', mediaId, creeLe: base++ };
-      if (video) e.duree = await dureeVideo(f);
-      await sauverElement(e);
+      if (!video && mode === 'oeuvres') {
+        await sauverElement(nouvelleOeuvre(visiteId, { photoId: mediaId, creeLe: base++ }));
+      } else if (!video && mode === 'une-oeuvre') {
+        if (!groupe) groupe = nouvelleOeuvre(visiteId, { creeLe: base++ });
+        ajouterVues(groupe, [mediaId]);
+        await sauverElement(groupe);
+      } else {
+        const e = { id: uid(), visiteId, type: video ? 'video' : 'photo', mediaId, creeLe: base++ };
+        if (video) e.duree = await dureeVideo(f);
+        await sauverElement(e);
+      }
     }
-    router();
+    if (groupe) aller(`#/oeuvre/${groupe.id}`); else router();
+  }
+
+  // Une simple photo de la visite devient une œuvre, ou rejoint une œuvre existante (vue ou cartel).
+  async function photoEnOeuvre(e) {
+    const o = nouvelleOeuvre(e.visiteId, { photoId: e.mediaId, creeLe: e.creeLe });
+    await ecrire('elements', o);
+    await effacer('elements', e.id);
+    await toucherVisite(e.visiteId);
+    return o;
+  }
+  async function rattacherPhoto(e) {
+    const oeuvres = (await elementsDe(e.visiteId)).filter((x) => x.type === 'oeuvre' && !oeuvreVide(x)).sort((a, b) => (a.creeLe || 0) - (b.creeLe || 0));
+    if (!oeuvres.length) { message('Cette visite n’a pas encore d’œuvre.'); return false; }
+    return new Promise((res) => {
+      const d = ouvrirDialogue(`<div class="boite">
+        <h2>Rattacher la photo</h2>
+        <div class="choix-role">
+          <label class="case"><input type="radio" name="role" value="vue" checked>Comme une autre vue de l’œuvre</label>
+          <label class="case"><input type="radio" name="role" value="cartel">Comme le cartel de l’œuvre</label>
+        </div>
+        <p class="libelle" style="margin:0">À quelle œuvre ?</p>
+        <div class="liste-oeuvres">${oeuvres.map((o) => `<button type="button" class="ligne-oeuvre" data-cible="${esc(o.id)}">
+          <span class="tirage"><span class="image">${o.photoId || o.cartelPhotoId ? `<img alt="" data-media="${esc(o.photoId || o.cartelPhotoId)}">` : ''}</span></span>
+          <span class="corps"><span class="italique">${esc(o.titre || 'Œuvre sans titre')}</span>${o.artiste ? `<span class="s">${esc(o.artiste)}</span>` : ''}</span>
+        </button>`).join('')}</div>
+        <button type="button" class="btn btn-lien" data-annuler>Annuler</button>
+      </div>`);
+      hydrater(d);
+      let fait = false;
+      d.querySelector('[data-annuler]').onclick = () => d.close();
+      d.querySelectorAll('[data-cible]').forEach((b) => b.addEventListener('click', async () => {
+        const role = d.querySelector('input[name="role"]:checked').value;
+        const x = await lire('elements', b.getAttribute('data-cible'));
+        if (!x) return;
+        let remplacer = !x.cartel;
+        if (role === 'cartel') {
+          if (x.cartelPhotoId && !confirm('Cette œuvre a déjà un cartel. Le remplacer par cette photo ?')) return;
+          const ancien = x.cartelPhotoId;
+          if (ancien) remplacer = true;
+          x.cartelPhotoId = e.mediaId;
+          x.ocr = 'en-cours';
+          await sauverElement(x);
+          if (ancien) await effacer('medias', ancien);
+        } else {
+          ajouterVues(x, [e.mediaId]);
+          await sauverElement(x);
+        }
+        await effacer('elements', e.id);
+        if (role === 'cartel') traiterCartel(x.id, remplacer);
+        fait = true;
+        d.close();
+        message(role === 'cartel' ? 'Cartel rattaché, lecture en cours.' : 'Vue ajoutée à l’œuvre.');
+      }));
+      d.addEventListener('close', () => res(fait));
+    });
   }
 
   function editerNote(id, visiteId) {
@@ -666,12 +757,67 @@
         <button type="button" class="btn" data-suppr>Supprimer</button>
       </div>
       <div class="media">${e.type === 'video' ? `<video controls playsinline src="${u}"></video>` : `<img alt="" src="${u}">`}</div>
+      ${e.type === 'photo' ? `<div class="bas">
+        <button type="button" class="btn btn-accent" data-en-oeuvre>En faire une œuvre</button>
+        <button type="button" class="btn btn-clair" data-rattacher>Rattacher à une œuvre</button>
+      </div>` : ''}
     </div>`, 'visionneuse');
     d.addEventListener('close', () => URL.revokeObjectURL(u));
     d.querySelector('[data-fermer]').onclick = () => d.close();
     d.querySelector('[data-suppr]').onclick = async () => {
       if (!confirm(e.type === 'video' ? 'Supprimer cette vidéo ?' : 'Supprimer cette photo ?')) return;
       await supprimerElement(e);
+      d.close();
+      router();
+    };
+    const enOeuvre = d.querySelector('[data-en-oeuvre]');
+    if (enOeuvre) enOeuvre.onclick = async () => {
+      const o = await photoEnOeuvre(e);
+      d.close();
+      aller(`#/oeuvre/${o.id}`);
+    };
+    const rattacher = d.querySelector('[data-rattacher]');
+    if (rattacher) rattacher.onclick = async () => {
+      if (await rattacherPhoto(e)) { d.close(); router(); }
+    };
+  }
+  // Une vue d'une œuvre, en grand : la mettre en photo principale ou la supprimer.
+  async function visionnerVue(oeuvreId, mediaId) {
+    const m = await lire('medias', mediaId);
+    if (!m) return;
+    const x0 = await lire('elements', oeuvreId);
+    const principale = x0 && x0.photoId === mediaId;
+    const u = URL.createObjectURL(m.blob);
+    const d = ouvrirDialogue(`<div class="boite">
+      <div class="haut">
+        <button type="button" class="icone-btn" data-fermer aria-label="Fermer">${I.fermer}</button>
+        <button type="button" class="btn" data-suppr>Supprimer cette vue</button>
+      </div>
+      <div class="media"><img alt="" src="${u}"></div>
+      ${principale ? '' : '<div class="bas"><button type="button" class="btn btn-clair" data-principale>Mettre en photo principale</button></div>'}
+    </div>`, 'visionneuse');
+    d.addEventListener('close', () => URL.revokeObjectURL(u));
+    d.querySelector('[data-fermer]').onclick = () => d.close();
+    d.querySelector('[data-suppr]').onclick = async () => {
+      if (!confirm('Supprimer cette vue de l’œuvre ?')) return;
+      await viderEnAttente();
+      const x = await lire('elements', oeuvreId);
+      if (!x) return;
+      if (x.photoId === mediaId) x.photoId = (x.vues || []).shift() || null;
+      else x.vues = (x.vues || []).filter((v) => v !== mediaId);
+      await sauverElement(x);
+      await effacer('medias', mediaId);
+      d.close();
+      router();
+    };
+    const p = d.querySelector('[data-principale]');
+    if (p) p.onclick = async () => {
+      await viderEnAttente();
+      const x = await lire('elements', oeuvreId);
+      if (!x) return;
+      x.vues = (x.vues || []).map((v) => (v === mediaId ? x.photoId : v)).filter(Boolean);
+      x.photoId = mediaId;
+      await sauverElement(x);
       d.close();
       router();
     };
@@ -716,11 +862,13 @@
       <div class="barre-haut"><div class="gauche">
         <a class="icone-btn" href="#/visite/${esc(v.id)}" aria-label="Retour à la visite">${I.retour}</a>
         <div class="rappel"><span class="titre">${esc(v.titre)}</span><span class="sous">${esc([v.lieu, fmtDate(v.date)].filter(Boolean).join(' · '))}</span></div>
-      </div></div>
+      </div>
+      <button type="button" class="btn btn-haut" data-supprimer-oeuvre aria-label="Supprimer cette œuvre">${I.poubelle}Supprimer</button></div>
       <div class="contenu"><div class="fiche">
-        <section aria-label="Photo de l'œuvre">
-          ${e.photoId ? `<button type="button" class="photo-principale" data-agrandir="${esc(e.photoId)}" aria-label="Agrandir la photo"><img alt="" data-media="${esc(e.photoId)}"></button>
-            <div class="actions-discretes"><button type="button" class="btn" data-prendre="photo" data-source="appareil">Reprendre</button><button type="button" class="btn" data-prendre="photo" data-source="phototheque">Photothèque</button></div>`
+        <section aria-label="Photos de l'œuvre">
+          ${e.photoId ? `<button type="button" class="photo-principale" data-vue="${esc(e.photoId)}" aria-label="Agrandir la photo"><img alt="" data-media="${esc(e.photoId)}"></button>
+            ${(e.vues || []).length ? `<div class="vues">${e.vues.map((mid, i) => `<button type="button" class="tirage" data-vue="${esc(mid)}" aria-label="Vue ${i + 2}"><span class="image"><img alt="" data-media="${esc(mid)}"></span></button>`).join('')}</div>` : ''}
+            <div class="actions-discretes"><button type="button" class="btn" data-prendre="photo" data-source="appareil">${I.plus}Ajouter une vue</button><button type="button" class="btn" data-prendre="photo" data-source="phototheque">Photothèque</button></div>`
             : emplacement('photo', '1. L’œuvre')}
         </section>
         <section aria-label="Cartel">
@@ -735,6 +883,7 @@
           <div class="champ"><label class="libelle" for="artiste">Artiste</label><input id="artiste" data-champ="artiste" type="text" autocomplete="off" value="${esc(e.artiste)}"></div>
           <div class="champ"><label class="libelle" for="titre-oeuvre">Titre de l'œuvre</label><input id="titre-oeuvre" data-champ="titre" type="text" autocomplete="off" style="font-style:italic" value="${esc(e.titre)}"></div>
           <div class="champ"><label class="libelle" for="cartel">Texte du cartel</label><textarea id="cartel" data-champ="cartel" rows="5">${esc(e.cartel)}</textarea></div>
+          <p class="aide" style="margin-top:-10px">Tout se corrige directement ici ; les modifications s’enregistrent toutes seules.</p>
         </section>
         <section class="section">
           <div class="champ"><label class="libelle" for="notes">Mes notes</label><textarea id="notes" data-champ="notes" rows="4" placeholder="Ce que l’œuvre m’évoque… (micro du clavier pour dicter)">${esc(e.notes)}</textarea></div>
@@ -772,20 +921,30 @@
 
     app.querySelectorAll('[data-prendre]').forEach((b) => b.addEventListener('click', async () => {
       const role = b.getAttribute('data-prendre');
-      const fichiers = await choisirFichiers({ accept: 'image/*', capture: b.getAttribute('data-source') === 'appareil' ? 'environment' : null });
+      const appareil = b.getAttribute('data-source') === 'appareil';
+      // Pour les vues de l'œuvre, la photothèque accepte plusieurs photos d'un coup.
+      const fichiers = await choisirFichiers({ accept: 'image/*', capture: appareil ? 'environment' : null, multiple: role === 'photo' && !appareil });
       if (!fichiers.length) return;
       await viderEnAttente();
+      if (role === 'photo') {
+        const ids = [];
+        for (const f of fichiers) ids.push(await ajouterMedia(await preparerImage(f), 'photo'));
+        const x = await lire('elements', id);
+        ajouterVues(x, ids);
+        await sauverElement(x);
+        return router();
+      }
       const blob = await preparerImage(fichiers[0]);
       const x = await lire('elements', id);
-      const cle = role === 'photo' ? 'photoId' : 'cartelPhotoId';
-      const ancien = x[cle];
-      x[cle] = await ajouterMedia(blob, role === 'photo' ? 'photo' : 'cartel');
-      if (role === 'cartel') x.ocr = 'en-cours';
+      const ancien = x.cartelPhotoId;
+      x.cartelPhotoId = await ajouterMedia(blob, 'cartel');
+      x.ocr = 'en-cours';
       await sauverElement(x);
       if (ancien) await effacer('medias', ancien);
-      if (role === 'cartel') traiterCartel(id, true);
+      traiterCartel(id, true);
       await router();
     }));
+    app.querySelectorAll('[data-vue]').forEach((b) => b.addEventListener('click', () => visionnerVue(id, b.getAttribute('data-vue'))));
     const relire = app.querySelector('[data-relire]');
     if (relire) relire.addEventListener('click', async () => {
       await viderEnAttente();
@@ -815,15 +974,15 @@
       await effacer('medias', mid);
       router();
     }));
-    app.querySelector('[data-supprimer-oeuvre]').addEventListener('click', async () => {
-      if (!confirm('Supprimer cette œuvre, ses photos et ses vocaux ?')) return;
+    app.querySelectorAll('[data-supprimer-oeuvre]').forEach((bouton) => bouton.addEventListener('click', async () => {
+      if (!confirm('Supprimer cette œuvre, toutes ses photos et ses vocaux ? Cette action est définitive.')) return;
       sauvegardesEnAttente.delete(id);
       await supprimerElement(await lire('elements', id));
       location.replace(`#/visite/${v.id}`);
-    });
+    }));
     app.querySelector('[data-suivante]').addEventListener('click', async () => {
       await viderEnAttente();
-      const n = { id: uid(), visiteId: v.id, type: 'oeuvre', creeLe: Date.now(), artiste: '', titre: '', cartel: '', notes: '', vocaux: [] };
+      const n = nouvelleOeuvre(v.id);
       await ecrire('elements', n);
       location.replace(`#/oeuvre/${n.id}`);
     });
@@ -859,6 +1018,7 @@
         if (e.type === 'oeuvre') {
           const base = [nn, slug(e.artiste), slug(e.titre)].filter(Boolean).join('-') || nn;
           nomer(e.photoId, base);
+          (e.vues || []).forEach((m, k) => nomer(m, `${base}-vue-${k + 2}`));
           nomer(e.cartelPhotoId, `${base}-cartel`);
           (e.vocaux || []).forEach((m, k) => nomer(m, `${base}-vocal-${k + 1}`));
         } else {
@@ -885,6 +1045,7 @@
           'Mes notes': e.notes || '',
           'Vocaux': (e.vocaux || []).length,
           "Photo de l'œuvre": chemins.get(e.photoId) || '',
+          'Autres vues': (e.vues || []).map((m) => chemins.get(m)).filter(Boolean).join(' ; '),
           'Photo du cartel': chemins.get(e.cartelPhotoId) || '',
           'Fichiers vocaux': (e.vocaux || []).map((m) => chemins.get(m)).filter(Boolean).join(' ; '),
         });
@@ -902,8 +1063,8 @@
       });
     }
     const wb = XLSX.utils.book_new();
-    const f1 = XLSX.utils.json_to_sheet(oeuvres, { header: ['Date', 'Exposition', 'Lieu', 'N°', 'Artiste', "Titre de l'œuvre", 'Texte du cartel', 'Mes notes', 'Vocaux', "Photo de l'œuvre", 'Photo du cartel', 'Fichiers vocaux'] });
-    f1['!cols'] = [12, 32, 24, 5, 24, 32, 50, 50, 7, 40, 40, 40].map((w) => ({ wch: w }));
+    const f1 = XLSX.utils.json_to_sheet(oeuvres, { header: ['Date', 'Exposition', 'Lieu', 'N°', 'Artiste', "Titre de l'œuvre", 'Texte du cartel', 'Mes notes', 'Vocaux', "Photo de l'œuvre", 'Autres vues', 'Photo du cartel', 'Fichiers vocaux'] });
+    f1['!cols'] = [12, 32, 24, 5, 24, 32, 50, 50, 7, 40, 50, 40, 40].map((w) => ({ wch: w }));
     const f2 = XLSX.utils.json_to_sheet(lignesVisites, { header: ['Date', 'Exposition', 'Lieu', 'Œuvres', 'Notes de visite', 'Vocaux', 'Vidéos', 'Photos'] });
     f2['!cols'] = [12, 36, 28, 8, 60, 8, 8, 8].map((w) => ({ wch: w }));
     XLSX.utils.book_append_sheet(wb, f1, 'Œuvres');
