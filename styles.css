@@ -237,3 +237,5 @@ dialog.visionneuse { width: 100vw; height: 100vh; height: 100dvh; max-width: non
   background: var(--encre); color: var(--tirage); padding: 10px 16px; border-radius: 3px; font-size: 14px;
   z-index: 50; max-width: 90vw; text-align: center;
 }
+
+[hidden] { display: none !important; }

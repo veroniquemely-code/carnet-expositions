@@ -1,6 +1,6 @@
 /* Service worker : met toute l'application en cache pour qu'elle fonctionne sans réseau.
    Changer VERSION à chaque mise à jour du code pour que les téléphones récupèrent la nouvelle version. */
-const VERSION = 'carnet-v2';
+const VERSION = 'carnet-v3';
 const FICHIERS = [
   './',
   'index.html',
@@ -29,6 +29,7 @@ const FICHIERS = [
   'vendor/tesseract/core/tesseract-core-simd-lstm.wasm.js',
   'vendor/tesseract/core/tesseract-core-relaxedsimd-lstm.wasm.js',
   'vendor/tesseract/lang/fra.traineddata.gz',
+  'vendor/tesseract/lang/eng.traineddata.gz',
 ];
 
 self.addEventListener('install', (event) => {
@@ -53,7 +54,7 @@ self.addEventListener('fetch', (event) => {
       if (trouve) return trouve;
       if (req.mode === 'navigate') return caches.match('index.html');
       return fetch(req).then((rep) => {
-        if (rep.ok) { const copie = rep.clone(); caches.open(VERSION).then((c) => c.put(req, copie)); }
+        if (rep.ok && !req.headers.has('range')) { const copie = rep.clone(); caches.open(VERSION).then((c) => c.put(req, copie)); }
         return rep;
       });
     })

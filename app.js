@@ -1,6 +1,6 @@
 /* Carnet d'expositions : application web hors connexion.
    Données : IndexedDB du téléphone (visites, éléments, médias).
-   Lecture des cartels : Tesseract (français), embarqué dans vendor/. */
+   Lecture des cartels : Tesseract (français et anglais), embarqué dans vendor/. Texte restitué dans la langue du cartel. */
 'use strict';
 (() => {
   const app = document.getElementById('app');
@@ -226,13 +226,13 @@
     });
   }
 
-  // ---------- Lecture des cartels (Tesseract) ----------
+  // ---------- Lecture des cartels (Tesseract, français et anglais) ----------
   let ocrTravailleur = null;
   let fileOcr = Promise.resolve();
   function travailleurOcr() {
     if (!ocrTravailleur) {
       const base = new URL('vendor/tesseract/', location.href).href;
-      ocrTravailleur = Tesseract.createWorker('fra', 1, {
+      ocrTravailleur = Tesseract.createWorker(['fra', 'eng'], 1, {
         workerPath: base + 'worker.min.js',
         corePath: base + 'core',
         langPath: base + 'lang',
@@ -244,7 +244,8 @@
   }
   async function imagePourOcr(blob) {
     const bmp = await createImageBitmap(blob);
-    const r = Math.min(2, 2200 / Math.max(bmp.width, bmp.height));
+    // 3000 px sur le grand côté : en dessous, le petit texte d'un cartel photographié en entier se dégrade vite.
+    const r = Math.min(2, 3000 / Math.max(bmp.width, bmp.height));
     const c = document.createElement('canvas');
     c.width = Math.round(bmp.width * r);
     c.height = Math.round(bmp.height * r);
@@ -262,12 +263,17 @@
     ctx.putImageData(img, 0, 0);
     return c;
   }
+  // Garde les sauts de paragraphe (une ligne vide) pour que le texte reste lisible.
   function nettoyerTexte(t) {
-    return String(t || '')
-      .split('\n')
-      .map((l) => l.replace(/\s+/g, ' ').trim())
-      .filter((l) => /[0-9A-Za-zÀ-ÿ]/.test(l) && l.replace(/[^0-9A-Za-zÀ-ÿ]/g, '').length >= 2)
-      .join('\n');
+    const lignes = String(t || '').split('\n').map((l) => l.replace(/\s+/g, ' ').trim());
+    const sortie = [];
+    for (const l of lignes) {
+      const lisible = /[0-9A-Za-zÀ-ÿ]/.test(l) && l.replace(/[^0-9A-Za-zÀ-ÿ]/g, '').length >= 2;
+      if (lisible) sortie.push(l);
+      else if (sortie.length && sortie[sortie.length - 1] !== '') sortie.push('');
+    }
+    while (sortie.length && sortie[sortie.length - 1] === '') sortie.pop();
+    return sortie.join('\n');
   }
   function lireCartel(blob) {
     const travail = fileOcr.then(async () => {
@@ -278,7 +284,15 @@
     fileOcr = travail.catch(() => {});
     return travail;
   }
+
   const enCours = new Set();
+  // Première ligne : l'artiste. Titre : la première ligne suivante qui n'est pas une date ou un lieu daté.
+  function deduireArtisteTitre(texte) {
+    const lignes = String(texte).split('\n').filter(Boolean);
+    const titre = lignes.slice(1, 4).find((l) => !/\d{3,4}/.test(l) && l.length <= 90);
+    return { artiste: lignes[0] || '', titre: titre || '' };
+  }
+  // Le texte est restitué dans la langue du cartel (français, anglais ou les deux), sans traduction.
   async function traiterCartel(oeuvreId, remplacer) {
     let e = await lire('elements', oeuvreId);
     if (!e || !e.cartelPhotoId) return;
@@ -296,9 +310,9 @@
     if (!e) return;
     if (!echec) {
       if (remplacer || !e.cartel) e.cartel = texte;
-      const lignes = texte.split('\n');
-      if (!e.artiste && lignes[0]) e.artiste = lignes[0];
-      if (!e.titre && lignes[1]) e.titre = lignes[1];
+      const { artiste, titre } = deduireArtisteTitre(texte);
+      if (!e.artiste && artiste) e.artiste = artiste;
+      if (!e.titre && titre) e.titre = titre;
     }
     e.ocr = echec ? 'echec' : (texte ? 'fait' : 'vide');
     await sauverElement(e);
@@ -375,7 +389,7 @@
     app.innerHTML = `<div class="page">
       <header class="entete-accueil">
         <p class="surtitre">Carnet d'expositions</p>
-        <h1>Mes visites</h1>
+        <h1>Mes visites d’exposition</h1>
       </header>
       <div class="recherche" role="search">
         <label for="recherche" class="sr">Rechercher dans toutes les visites</label>
@@ -384,10 +398,10 @@
       ${bandeau}
       <div class="contenu">
         <div id="resultats"></div>
-        <div id="liste">${cartes || '<p class="vide">Aucune visite pour l’instant. Commence par une nouvelle visite.</p>'}</div>
+        <div id="liste">${cartes || '<p class="vide">Aucune visite pour l’instant. Commence par une nouvelle exposition.</p>'}</div>
       </div>
       <div class="barre-bas"><div class="rangee">
-        <a class="btn btn-accent btn-plein" href="#/nouvelle">Nouvelle visite</a>
+        <a class="btn btn-accent btn-plein" href="#/nouvelle">Nouvelle exposition</a>
         <a class="btn icone-btn" style="width:48px;height:48px;padding:0" href="#/sauvegarde" aria-label="Sauvegarder et exporter">${I.export}</a>
       </div></div>
     </div>`;
@@ -458,7 +472,7 @@
     app.innerHTML = `<div class="page">
       <div class="barre-haut"><div class="gauche">
         <a class="icone-btn" href="${v ? `#/visite/${esc(v.id)}` : '#/'}" aria-label="Retour">${I.retour}</a>
-        <span class="surtitre">${v ? 'La visite' : 'Mes visites'}</span>
+        <span class="surtitre">${v ? 'La visite' : 'Mes visites d’exposition'}</span>
       </div></div>
       <div class="contenu">
         <h1 style="padding-top:12px">${v ? 'Modifier la visite' : 'Nouvelle visite'}</h1>
@@ -641,7 +655,8 @@
     let groupe = null;
     for (const f of fichiers) {
       const video = (f.type || '').startsWith('video/');
-      const blob = video ? f : await preparerImage(f);
+      // Pleine résolution (4096 px) : une photo importée peut être un cartel, dont la lecture demande du détail.
+      const blob = video ? f : await preparerImage(f, 4096, 0.9);
       const mediaId = await ajouterMedia(blob, video ? 'video' : 'photo');
       if (!video && mode === 'oeuvres') {
         await sauverElement(nouvelleOeuvre(visiteId, { photoId: mediaId, creeLe: base++ }));
@@ -842,6 +857,7 @@
     if (e.ocr === 'vide') return '<span class="statut">Aucun texte lisible. Une photo plus nette, de face et sans reflet, aide beaucoup.</span>';
     return '<span class="statut">Texte lu automatiquement, à corriger si besoin.</span>';
   }
+
   function emplacement(role, libelle) {
     return `<div class="emplacement">
       <p>${libelle}</p>
@@ -897,6 +913,9 @@
       </div></div>
     </div>`;
 
+    // Les zones de texte grandissent avec leur contenu (un cartel est souvent long).
+    app.querySelectorAll('textarea[data-champ]').forEach((t) => { ajusterHauteur(t); t.addEventListener('input', () => ajusterHauteur(t)); });
+
     // Sauvegarde automatique des champs
     const sauverChamps = async () => {
       sauvegardesEnAttente.delete(id);
@@ -934,7 +953,8 @@
         await sauverElement(x);
         return router();
       }
-      const blob = await preparerImage(fichiers[0]);
+      // Photo du cartel gardée en pleine résolution : la lecture du petit texte en dépend.
+      const blob = await preparerImage(fichiers[0], 4096, 0.92);
       const x = await lire('elements', id);
       const ancien = x.cartelPhotoId;
       x.cartelPhotoId = await ajouterMedia(blob, 'cartel');
@@ -987,6 +1007,11 @@
       location.replace(`#/oeuvre/${n.id}`);
     });
   }
+  function ajusterHauteur(t) {
+    if (!t || !t.offsetParent) return;
+    t.style.height = 'auto';
+    t.style.height = `${t.scrollHeight + 2}px`;
+  }
   function rafraichirCartel(id, e) {
     if (vueCourante !== `/oeuvre/${id}`) return;
     const zone = document.getElementById('statut-cartel');
@@ -994,7 +1019,7 @@
     if (!e) return;
     for (const k of ['artiste', 'titre', 'cartel']) {
       const c = app.querySelector(`[data-champ="${k}"]`);
-      if (c && document.activeElement !== c && c.value !== (e[k] || '')) c.value = e[k] || '';
+      if (c && document.activeElement !== c && c.value !== (e[k] || '')) { c.value = e[k] || ''; if (c.tagName === 'TEXTAREA') ajusterHauteur(c); }
     }
   }
 
@@ -1103,7 +1128,7 @@
     app.innerHTML = `<div class="page">
       <div class="barre-haut"><div class="gauche">
         <a class="icone-btn" href="#/" aria-label="Retour aux visites">${I.retour}</a>
-        <span class="surtitre">Mes visites</span>
+        <span class="surtitre">Mes visites d’exposition</span>
       </div></div>
       <div class="contenu">
         <h1 style="padding:12px 0 18px">Sauvegarder</h1>
