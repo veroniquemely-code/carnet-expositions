@@ -1,6 +1,6 @@
 /* Service worker : met toute l'application en cache pour qu'elle fonctionne sans réseau.
    Changer VERSION à chaque mise à jour du code pour que les téléphones récupèrent la nouvelle version. */
-const VERSION = 'carnet-v3';
+const VERSION = 'carnet-v5';
 const FICHIERS = [
   './',
   'index.html',

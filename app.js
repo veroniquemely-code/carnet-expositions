@@ -54,6 +54,30 @@
     setTimeout(() => m.remove(), duree);
   }
 
+  // ---------- Copie dans la photothèque de l'iPhone ----------
+  // Une application web ne peut pas écrire seule dans Photos : on passe par la feuille de partage
+  // (« Enregistrer l'image »). Safari ne l'ouvre que juste après un toucher ; au retour de l'appareil
+  // photo ce délai est souvent écoulé, d'où le bandeau qui demande un toucher de plus.
+  async function partagerVersPhotos(fichiers) {
+    try { await navigator.share({ files: fichiers }); return true; } catch (e) { return e.name === 'AbortError' ? true : false; }
+  }
+  async function proposerPhotos(fichiers) {
+    if (!fichiers.length || !navigator.share || !navigator.canShare || !navigator.canShare({ files: fichiers })) return;
+    if (navigator.userActivation && navigator.userActivation.isActive && await partagerVersPhotos(fichiers)) return;
+    document.querySelectorAll('.bandeau-photos').forEach((b) => b.remove());
+    const b = document.createElement('div');
+    b.className = 'bandeau-photos';
+    b.innerHTML = `<button type="button" class="btn btn-accent" data-ok>${fichiers.length > 1 ? `Enregistrer les ${fichiers.length} photos dans Photos` : 'Enregistrer dans Photos'}</button><button type="button" class="icone-btn" data-non aria-label="Ne pas enregistrer">${I.fermer}</button>`;
+    document.body.appendChild(b);
+    const minuteur = setTimeout(() => b.remove(), 15000);
+    b.querySelector('[data-non]').onclick = () => { clearTimeout(minuteur); b.remove(); };
+    b.querySelector('[data-ok]').onclick = async () => {
+      clearTimeout(minuteur);
+      b.remove();
+      if (!(await partagerVersPhotos(fichiers))) message("L'enregistrement dans Photos n'a pas abouti.");
+    };
+  }
+
   // ---------- Base de données (IndexedDB) ----------
   let dbPromesse;
   function db() {
@@ -242,23 +266,26 @@
     }
     return ocrTravailleur;
   }
-  async function imagePourOcr(blob) {
+  async function imagePourOcr(blob, cadre) {
     const bmp = await createImageBitmap(blob);
+    // Cadre choisi à la main (fractions de la photo) : seule cette zone est lue.
+    const k = cadre || { x: 0, y: 0, l: 1, h: 1 };
+    const sx = Math.round(k.x * bmp.width), sy = Math.round(k.y * bmp.height);
+    const sl = Math.max(1, Math.round(k.l * bmp.width)), sh = Math.max(1, Math.round(k.h * bmp.height));
     // 3000 px sur le grand côté : en dessous, le petit texte d'un cartel photographié en entier se dégrade vite.
-    const r = Math.min(2, 3000 / Math.max(bmp.width, bmp.height));
+    const r = Math.min(2, 3000 / Math.max(sl, sh));
     const c = document.createElement('canvas');
-    c.width = Math.round(bmp.width * r);
-    c.height = Math.round(bmp.height * r);
+    c.width = Math.round(sl * r);
+    c.height = Math.round(sh * r);
     const ctx = c.getContext('2d');
-    ctx.drawImage(bmp, 0, 0, c.width, c.height);
+    ctx.drawImage(bmp, sx, sy, sl, sh, 0, 0, c.width, c.height);
     if (bmp.close) bmp.close();
-    // Passage en niveaux de gris avec léger contraste, utile sous les éclairages de musée.
+    // Passage en niveaux de gris, sans renforcer le contraste : sur un mur texturé ou au bord d'un tableau,
+    // le contraste fabriquait des pseudo-lettres lues comme du texte (mesuré le 15 novembre 2026).
     const img = ctx.getImageData(0, 0, c.width, c.height);
     const p = img.data;
     for (let i = 0; i < p.length; i += 4) {
-      let g = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
-      g = Math.max(0, Math.min(255, (g - 128) * 1.35 + 128));
-      p[i] = p[i + 1] = p[i + 2] = g;
+      p[i] = p[i + 1] = p[i + 2] = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
     }
     ctx.putImageData(img, 0, 0);
     return c;
@@ -275,11 +302,30 @@
     while (sortie.length && sortie[sortie.length - 1] === '') sortie.pop();
     return sortie.join('\n');
   }
-  function lireCartel(blob) {
+  // Ne garde que les lignes lues avec assurance : le reste (mur, cadre, reflets, bord du tableau) donnait du charabia.
+  function garderLignesSures(data) {
+    if (!data.blocks) return data.text || '';
+    const sortie = [];
+    for (const bloc of data.blocks) {
+      for (const para of bloc.paragraphs || []) {
+        let garde = false;
+        for (const ligne of para.lines || []) {
+          const mots = (ligne.words || []).filter((m) => m.confidence >= 30);
+          const surs = mots.filter((m) => m.confidence >= 55 && /[0-9A-Za-zÀ-ÿ]/.test(m.text));
+          if (ligne.confidence < 60 || !surs.length) continue;
+          sortie.push(mots.map((m) => m.text).join(' '));
+          garde = true;
+        }
+        if (garde) sortie.push('');
+      }
+    }
+    return sortie.join('\n');
+  }
+  function lireCartel(blob, cadre) {
     const travail = fileOcr.then(async () => {
       const w = await travailleurOcr();
-      const { data } = await w.recognize(await imagePourOcr(blob));
-      return nettoyerTexte(data.text);
+      const { data } = await w.recognize(await imagePourOcr(blob, cadre), {}, { text: true, blocks: true });
+      return nettoyerTexte(garderLignesSures(data));
     });
     fileOcr = travail.catch(() => {});
     return travail;
@@ -304,7 +350,7 @@
     rafraichirCartel(oeuvreId);
     let texte = '';
     let echec = false;
-    try { texte = await lireCartel(m.blob); } catch (err) { console.error(err); echec = true; }
+    try { texte = await lireCartel(m.blob, e.cartelCadre); } catch (err) { console.error(err); echec = true; }
     enCours.delete(oeuvreId);
     e = await lire('elements', oeuvreId);
     if (!e) return;
@@ -708,9 +754,13 @@
         let remplacer = !x.cartel;
         if (role === 'cartel') {
           if (x.cartelPhotoId && !confirm('Cette œuvre a déjà un cartel. Le remplacer par cette photo ?')) return;
+          const m = await lire('medias', e.mediaId);
+          const cadre = m ? await cadrerCartel(m.blob) : null;
+          if (cadre === undefined) return;
           const ancien = x.cartelPhotoId;
           if (ancien) remplacer = true;
           x.cartelPhotoId = e.mediaId;
+          x.cartelCadre = cadre;
           x.ocr = 'en-cours';
           await sauverElement(x);
           if (ancien) await effacer('medias', ancien);
@@ -849,6 +899,73 @@
     d.querySelector('[data-fermer]').onclick = () => d.close();
   }
 
+  // ---------- Cadrage du cartel ----------
+  // Rend le cadre choisi (fractions de la photo), null pour toute la photo, undefined si l'on annule.
+  function cadrerCartel(blob, cadreInitial) {
+    return new Promise((res) => {
+      const u = URL.createObjectURL(blob);
+      const d = ouvrirDialogue(`<div class="boite">
+        <div class="haut"><span class="consigne">Ajuste le cadre autour du cartel</span><button type="button" class="icone-btn" data-fermer aria-label="Annuler">${I.fermer}</button></div>
+        <div class="media"><div class="scene"><img alt="" src="${u}" draggable="false"><div class="cadre"><span data-coin="nw"></span><span data-coin="ne"></span><span data-coin="sw"></span><span data-coin="se"></span></div></div></div>
+        <div class="bas"><button type="button" class="btn btn-accent" data-lire>Lire ce cadre</button><button type="button" class="btn btn-clair" data-tout>Toute la photo</button></div>
+      </div>`, 'visionneuse cadrage');
+      const img = d.querySelector('img'), scene = d.querySelector('.scene'), cadre = d.querySelector('.cadre');
+      let k = cadreInitial ? { ...cadreInitial } : { x: 0.1, y: 0.1, l: 0.8, h: 0.8 };
+      let rendu;
+      const placer = () => {
+        cadre.style.left = `${k.x * 100}%`; cadre.style.top = `${k.y * 100}%`;
+        cadre.style.width = `${k.l * 100}%`; cadre.style.height = `${k.h * 100}%`;
+      };
+      const ajuster = () => {
+        // La scène prend exactement la taille affichée de la photo, pour que le cadre colle à l'image.
+        const zone = d.querySelector('.media');
+        const r = Math.min(zone.clientWidth / img.naturalWidth, zone.clientHeight / img.naturalHeight);
+        scene.style.width = `${Math.floor(img.naturalWidth * r)}px`;
+        scene.style.height = `${Math.floor(img.naturalHeight * r)}px`;
+        placer();
+      };
+      img.onload = ajuster;
+      window.addEventListener('resize', ajuster);
+      const MIN = 0.06;
+      let geste = null;
+      const borne = (v, a, b) => Math.max(a, Math.min(b, v));
+      scene.addEventListener('pointerdown', (ev) => {
+        const coin = ev.target.getAttribute && ev.target.getAttribute('data-coin');
+        if (!coin && !cadre.contains(ev.target)) return;
+        ev.preventDefault();
+        scene.setPointerCapture(ev.pointerId);
+        geste = { coin, x0: ev.clientX, y0: ev.clientY, k0: { ...k }, l: scene.clientWidth, h: scene.clientHeight };
+      });
+      scene.addEventListener('pointermove', (ev) => {
+        if (!geste) return;
+        const dx = (ev.clientX - geste.x0) / geste.l, dy = (ev.clientY - geste.y0) / geste.h;
+        const a = geste.k0;
+        if (!geste.coin) {
+          k.x = borne(a.x + dx, 0, 1 - a.l); k.y = borne(a.y + dy, 0, 1 - a.h);
+        } else {
+          let g = a.x, dr = a.x + a.l, hh = a.y, b = a.y + a.h;
+          if (geste.coin.includes('w')) g = borne(a.x + dx, 0, dr - MIN);
+          if (geste.coin.includes('e')) dr = borne(a.x + a.l + dx, g + MIN, 1);
+          if (geste.coin.includes('n')) hh = borne(a.y + dy, 0, b - MIN);
+          if (geste.coin.includes('s')) b = borne(a.y + a.h + dy, hh + MIN, 1);
+          k = { x: g, y: hh, l: dr - g, h: b - hh };
+        }
+        placer();
+      });
+      const lacher = () => { geste = null; };
+      scene.addEventListener('pointerup', lacher);
+      scene.addEventListener('pointercancel', lacher);
+      d.querySelector('[data-lire]').onclick = () => { rendu = { ...k }; d.close(); };
+      d.querySelector('[data-tout]').onclick = () => { rendu = null; d.close(); };
+      d.querySelector('[data-fermer]').onclick = () => d.close();
+      d.addEventListener('close', () => {
+        window.removeEventListener('resize', ajuster);
+        URL.revokeObjectURL(u);
+        res(rendu);
+      });
+    });
+  }
+
   // ---------- Vue : fiche d'une œuvre ----------
   function blocStatut(e) {
     if (!e.cartelPhotoId) return '';
@@ -892,7 +1009,7 @@
               <button type="button" class="vignette" data-agrandir="${esc(e.cartelPhotoId)}" aria-label="Agrandir le cartel"><img alt="" data-media="${esc(e.cartelPhotoId)}"></button>
               <div class="corps"><span class="libelle" style="margin:0">Cartel</span><div id="statut-cartel">${blocStatut(e)}</div></div>
             </div>
-            <div class="actions-discretes"><button type="button" class="btn" data-relire>Relire le cartel</button><button type="button" class="btn" data-prendre="cartel" data-source="appareil">Reprendre</button><button type="button" class="btn" data-prendre="cartel" data-source="phototheque">Photothèque</button></div>`
+            <div class="actions-discretes"><button type="button" class="btn" data-relire>Recadrer et relire</button><button type="button" class="btn" data-prendre="cartel" data-source="appareil">Reprendre</button><button type="button" class="btn" data-prendre="cartel" data-source="phototheque">Photothèque</button></div>`
             : emplacement('cartel', '2. Le cartel')}
         </section>
         <section class="section">
@@ -945,31 +1062,44 @@
       const fichiers = await choisirFichiers({ accept: 'image/*', capture: appareil ? 'environment' : null, multiple: role === 'photo' && !appareil });
       if (!fichiers.length) return;
       await viderEnAttente();
+      // Les photos prises avec l'appareil sont proposées à la photothèque (celles qui en viennent y sont déjà).
+      const versPhotos = appareil ? fichiers : [];
       if (role === 'photo') {
         const ids = [];
         for (const f of fichiers) ids.push(await ajouterMedia(await preparerImage(f), 'photo'));
         const x = await lire('elements', id);
         ajouterVues(x, ids);
         await sauverElement(x);
-        return router();
+        await router();
+        return proposerPhotos(versPhotos);
       }
       // Photo du cartel gardée en pleine résolution : la lecture du petit texte en dépend.
       const blob = await preparerImage(fichiers[0], 4096, 0.92);
+      const cadre = await cadrerCartel(blob);
+      if (cadre === undefined) return;
       const x = await lire('elements', id);
       const ancien = x.cartelPhotoId;
       x.cartelPhotoId = await ajouterMedia(blob, 'cartel');
+      x.cartelCadre = cadre;
       x.ocr = 'en-cours';
       await sauverElement(x);
       if (ancien) await effacer('medias', ancien);
       traiterCartel(id, true);
       await router();
+      proposerPhotos(versPhotos);
     }));
     app.querySelectorAll('[data-vue]').forEach((b) => b.addEventListener('click', () => visionnerVue(id, b.getAttribute('data-vue'))));
     const relire = app.querySelector('[data-relire]');
     if (relire) relire.addEventListener('click', async () => {
       await viderEnAttente();
       const x = await lire('elements', id);
+      const m = await lire('medias', x.cartelPhotoId);
+      if (!m) return;
+      const cadre = await cadrerCartel(m.blob, x.cartelCadre);
+      if (cadre === undefined) return;
       if (x.cartel && !confirm('Relire le cartel remplacera le texte actuel. Continuer ?')) return;
+      x.cartelCadre = cadre;
+      await sauverElement(x);
       traiterCartel(id, true);
     });
     app.querySelectorAll('[data-agrandir]').forEach((b) => b.addEventListener('click', () => visionnerMedia(b.getAttribute('data-agrandir'))));
@@ -1053,47 +1183,59 @@
     }
     return { visites, elements, medias, chemins, numeros, parVisite };
   }
-  function construireExcel({ visites, chemins, numeros, parVisite }) {
-    const oeuvres = [];
-    const lignesVisites = [];
+  // liens : dossier (ex. 'medias/') placé à côté du fichier Excel, où se trouvent les médias ; chaque nom de
+  // fichier devient alors un lien cliquable. inclus : identifiants des médias présents dans ce dossier.
+  // Sans liens (Excel seul), les cellules donnent le chemin du fichier tel qu'il est rangé dans la sauvegarde.
+  function construireExcel({ visites, chemins, numeros, parVisite }, { liens = null, inclus = null } = {}) {
+    const LIBELLE = { photo: 'Photo', video: 'Vidéo', vocal: 'Vocal' };
+    const toutes = visites.flatMap((v) => parVisite.get(v.id).filter((x) => x.type === 'oeuvre'));
+    const nVues = Math.max(0, ...toutes.map((e) => (e.vues || []).length));
+    const nVocaux = Math.max(0, ...toutes.map((e) => (e.vocaux || []).length));
+    // Une cellule de fichier : { f: identifiant du média } ; transformée plus bas en texte et lien.
+    const fichier = (mid) => (mid && chemins.has(mid) ? { f: mid } : '');
+    const entete1 = ['Date', 'Exposition', 'Lieu', 'N°', 'Artiste', "Titre de l'œuvre", 'Texte du cartel', 'Mes notes', "Photo de l'œuvre",
+      ...Array.from({ length: nVues }, (_, k) => `Vue ${k + 2}`), 'Photo du cartel', ...Array.from({ length: nVocaux }, (_, k) => `Vocal ${k + 1}`)];
+    const lignes1 = [];
+    const lignes2 = [];
+    const lignes3 = [];
     for (const v of visites) {
       const els = parVisite.get(v.id);
       for (const e of els.filter((x) => x.type === 'oeuvre')) {
-        oeuvres.push({
-          'Date': v.date || '',
-          'Exposition': v.titre || '',
-          'Lieu': v.lieu || '',
-          'N°': numeros.get(e.id),
-          'Artiste': e.artiste || '',
-          "Titre de l'œuvre": e.titre || '',
-          'Texte du cartel': e.cartel || '',
-          'Mes notes': e.notes || '',
-          'Vocaux': (e.vocaux || []).length,
-          "Photo de l'œuvre": chemins.get(e.photoId) || '',
-          'Autres vues': (e.vues || []).map((m) => chemins.get(m)).filter(Boolean).join(' ; '),
-          'Photo du cartel': chemins.get(e.cartelPhotoId) || '',
-          'Fichiers vocaux': (e.vocaux || []).map((m) => chemins.get(m)).filter(Boolean).join(' ; '),
-        });
+        const vues = e.vues || [];
+        const vocaux = e.vocaux || [];
+        lignes1.push([v.date || '', v.titre || '', v.lieu || '', numeros.get(e.id), e.artiste || '', e.titre || '', e.cartel || '', e.notes || '',
+          fichier(e.photoId), ...Array.from({ length: nVues }, (_, k) => fichier(vues[k])), fichier(e.cartelPhotoId),
+          ...Array.from({ length: nVocaux }, (_, k) => fichier(vocaux[k]))]);
+      }
+      for (const e of els.filter((x) => LIBELLE[x.type])) {
+        lignes3.push([v.date || '', v.titre || '', numeros.get(e.id), LIBELLE[e.type], e.duree ? fmtDuree(e.duree) : '', fichier(e.mediaId)]);
       }
       const n = (t) => els.filter((x) => x.type === t).length;
-      lignesVisites.push({
-        'Date': v.date || '',
-        'Exposition': v.titre || '',
-        'Lieu': v.lieu || '',
-        'Œuvres': n('oeuvre'),
-        'Notes de visite': els.filter((x) => x.type === 'note').map((x) => x.texte).join('\n\n'),
-        'Vocaux': n('vocal') + els.reduce((s, x) => s + (x.vocaux || []).length, 0),
-        'Vidéos': n('video'),
-        'Photos': n('photo'),
-      });
+      lignes2.push([v.date || '', v.titre || '', v.lieu || '', n('oeuvre'), els.filter((x) => x.type === 'note').map((x) => x.texte).join('\n\n'),
+        n('vocal') + els.reduce((s, x) => s + (x.vocaux || []).length, 0), n('video'), n('photo')]);
     }
+    const feuille = (entete, lignes, largeurs) => {
+      const brut = [entete, ...lignes.map((l) => l.map((c) => {
+        if (!c || typeof c !== 'object') return c;
+        const chemin = chemins.get(c.f);
+        return liens ? chemin.split('/').pop() : chemin;
+      }))];
+      const f = XLSX.utils.aoa_to_sheet(brut);
+      if (liens) {
+        lignes.forEach((l, r) => l.forEach((c, k) => {
+          if (!c || typeof c !== 'object') return;
+          const cellule = f[XLSX.utils.encode_cell({ r: r + 1, c: k })];
+          if (inclus && !inclus.has(c.f)) { cellule.v += ' (non incluse)'; return; }
+          cellule.l = { Target: liens + chemins.get(c.f), Tooltip: 'Ouvrir le fichier' };
+        }));
+      }
+      f['!cols'] = largeurs.map((w) => ({ wch: w }));
+      return f;
+    };
     const wb = XLSX.utils.book_new();
-    const f1 = XLSX.utils.json_to_sheet(oeuvres, { header: ['Date', 'Exposition', 'Lieu', 'N°', 'Artiste', "Titre de l'œuvre", 'Texte du cartel', 'Mes notes', 'Vocaux', "Photo de l'œuvre", 'Autres vues', 'Photo du cartel', 'Fichiers vocaux'] });
-    f1['!cols'] = [12, 32, 24, 5, 24, 32, 50, 50, 7, 40, 50, 40, 40].map((w) => ({ wch: w }));
-    const f2 = XLSX.utils.json_to_sheet(lignesVisites, { header: ['Date', 'Exposition', 'Lieu', 'Œuvres', 'Notes de visite', 'Vocaux', 'Vidéos', 'Photos'] });
-    f2['!cols'] = [12, 36, 28, 8, 60, 8, 8, 8].map((w) => ({ wch: w }));
-    XLSX.utils.book_append_sheet(wb, f1, 'Œuvres');
-    XLSX.utils.book_append_sheet(wb, f2, 'Visites');
+    XLSX.utils.book_append_sheet(wb, feuille(entete1, lignes1, [12, 32, 24, 5, 24, 32, 50, 50, 36, ...Array(nVues).fill(36), 36, ...Array(nVocaux).fill(36)]), 'Œuvres');
+    XLSX.utils.book_append_sheet(wb, feuille(['Date', 'Exposition', 'Lieu', 'Œuvres', 'Notes de visite', 'Vocaux', 'Vidéos', 'Photos'], lignes2, [12, 36, 28, 8, 60, 8, 8, 8]), 'Visites');
+    XLSX.utils.book_append_sheet(wb, feuille(['Date', 'Exposition', 'N°', 'Type', 'Durée', 'Fichier'], lignes3, [12, 36, 5, 8, 8, 36]), 'Médias');
     const octets = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     return new Blob([octets], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   }
@@ -1141,14 +1283,14 @@
 
         <div class="bloc">
           <h2>Fichier Excel</h2>
-          <p>Le fichier <em>carnet-expositions.xlsx</em> contient toutes les visites depuis le début : un onglet Œuvres (une ligne par œuvre) et un onglet Visites. Enregistre-le dans Fichiers sous le même nom pour remplacer l’ancien. Les corrections se font ici, dans l’application.</p>
+          <p>Le fichier <em>carnet-expositions.xlsx</em> contient toutes les visites depuis le début : un onglet Œuvres (une ligne par œuvre), un onglet Visites et un onglet Médias. Il donne le nom des photos sans les photos elles-mêmes : pour les avoir avec leurs liens, fais la sauvegarde complète. Enregistre-le dans Fichiers sous le même nom pour remplacer l’ancien. Les corrections se font ici, dans l’application.</p>
           <button type="button" class="btn btn-accent" data-action="excel">Exporter le fichier Excel</button>
           <div class="progression" data-zone="excel"></div>
         </div>
 
         <div class="bloc">
           <h2>Sauvegarde complète</h2>
-          <p>Une archive avec le fichier Excel, toutes les données et tous les médias, rangés par visite. À faire après chaque visite et à ranger dans iCloud : c’est elle qui permet de tout restaurer.</p>
+          <p>Une archive avec le fichier Excel, toutes les données et tous les médias, rangés par visite dans un dossier <em>medias</em>. Dans cet Excel, chaque nom de photo, de vidéo ou de vocal est un lien qui ouvre le fichier. À faire après chaque visite et à ranger dans iCloud Drive : c’est elle qui permet de tout restaurer. Pour la consulter, touche l’archive dans Fichiers : elle se décompresse en un dossier.</p>
           <label class="case"><input type="checkbox" data-videos checked>Inclure les vidéos (${taille(poidsVideos)})</label>
           <button type="button" class="btn btn-accent" data-action="complete">Préparer la sauvegarde</button>
           <div class="progression" data-zone="complete"></div>
@@ -1191,8 +1333,9 @@
       try {
         const c = await collecter();
         const zip = new JSZip();
-        zip.file('carnet-expositions.xlsx', construireExcel(c));
         const inclus = c.medias.filter((m) => c.chemins.has(m.id) && (avecVideos || m.nature !== 'video'));
+        // L'Excel de la sauvegarde renvoie, par des liens, aux médias rangés à côté de lui dans medias/.
+        zip.file('carnet-expositions.xlsx', construireExcel(c, { liens: 'medias/', inclus: new Set(inclus.map((m) => m.id)) }));
         zip.file('donnees.json', JSON.stringify({
           format: 'carnet-expositions', version: 1, exporteLe: new Date().toISOString(),
           visites: c.visites, elements: c.elements,

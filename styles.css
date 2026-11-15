@@ -239,3 +239,25 @@ dialog.visionneuse { width: 100vw; height: 100vh; height: 100dvh; max-width: non
 }
 
 [hidden] { display: none !important; }
+
+/* Cadrage du cartel */
+.cadrage .haut { align-items: center; }
+.cadrage .consigne { font-size: 14px; letter-spacing: .04em; padding-left: 8px; }
+.cadrage .media { padding: 12px; overflow: hidden; }
+.cadrage .scene { position: relative; touch-action: none; user-select: none; -webkit-user-select: none; }
+.cadrage .scene img { width: 100%; height: 100%; max-width: none; max-height: none; display: block; -webkit-touch-callout: none; }
+.cadrage .cadre { position: absolute; border: 2px solid var(--tirage); box-shadow: 0 0 0 9999px rgba(28, 25, 21, .55); cursor: move; }
+.cadrage .cadre span { position: absolute; width: 34px; height: 34px; }
+.cadrage .cadre span::after { content: ''; position: absolute; width: 16px; height: 16px; border: 3px solid var(--tirage); }
+.cadrage .cadre [data-coin="nw"] { left: -18px; top: -18px; } .cadrage .cadre [data-coin="nw"]::after { right: 6px; bottom: 6px; border-right: 0; border-bottom: 0; }
+.cadrage .cadre [data-coin="ne"] { right: -18px; top: -18px; } .cadrage .cadre [data-coin="ne"]::after { left: 6px; bottom: 6px; border-left: 0; border-bottom: 0; }
+.cadrage .cadre [data-coin="sw"] { left: -18px; bottom: -18px; } .cadrage .cadre [data-coin="sw"]::after { right: 6px; top: 6px; border-right: 0; border-top: 0; }
+.cadrage .cadre [data-coin="se"] { right: -18px; bottom: -18px; } .cadrage .cadre [data-coin="se"]::after { left: 6px; top: 6px; border-left: 0; border-top: 0; }
+
+/* Proposition d'enregistrer une photo dans la photothèque */
+.bandeau-photos {
+  position: fixed; left: 16px; right: 16px; top: calc(12px + env(safe-area-inset-top));
+  display: flex; align-items: center; gap: 6px; padding: 8px 6px 8px 8px; z-index: 60;
+  background: var(--tirage); border: 1px solid var(--filet); border-radius: 3px; box-shadow: 0 6px 24px rgba(43, 38, 32, .18);
+}
+.bandeau-photos .btn { flex: 1; white-space: nowrap; }
